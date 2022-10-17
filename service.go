@@ -17,19 +17,19 @@ type Service[T constraints.Ordered] interface {
 func NewService[T constraints.Ordered]() *EntityMutex[T] {
 	var condMux sync.Mutex
 	return &EntityMutex[T]{
-		unlockUpdateMux: &condMux,
-		unlockUpdate:    sync.NewCond(&condMux),
-		entityMux:       &sync.Mutex{},
-		entityLock:      make(map[T]bool),
+		unlockCondMux: &condMux,
+		unlockCond:    sync.NewCond(&condMux),
+		entityMux:     &sync.Mutex{},
+		entityLock:    make(map[T]bool),
 	}
 }
 
 // EntityMutex is a service implementation.
 type EntityMutex[T constraints.Ordered] struct {
 	// used for syncing the sync.Cond
-	unlockUpdateMux *sync.Mutex
+	unlockCondMux *sync.Mutex
 	// used for getting an update that indicates unlocked entities
-	unlockUpdate *sync.Cond
+	unlockCond *sync.Cond
 
 	// used for locking/unlocking entities
 	entityMux *sync.Mutex
@@ -39,33 +39,23 @@ type EntityMutex[T constraints.Ordered] struct {
 
 // Lock locks the group of entities.
 func (s EntityMutex[T]) Lock(ids []T) {
-	s.entityMux.Lock()
 	// check if the required entities are unlocked
-	if s.isAvailable(ids) {
-		// if yes then lock them
-		s.lock(ids)
-		s.entityMux.Unlock()
-		// and proceed
+	if s.tryLock(ids) {
+		// if yes then lock them and proceed
 		return
 	}
 	// if we are here then at least one required entity is locked
-	s.entityMux.Unlock()
 	for {
 		// waiting for update that should be sent when at least one entity is unlocked
-		s.unlockUpdateMux.Lock()
-		s.unlockUpdate.Wait()
-		s.unlockUpdateMux.Unlock()
+		s.unlockCondMux.Lock()
+		s.unlockCond.Wait()
+		s.unlockCondMux.Unlock()
 		// got an update
-		s.entityMux.Lock()
 		// check if the required entities are unlocked
-		if s.isAvailable(ids) {
-			// if yes, then lock them
-			s.lock(ids)
-			s.entityMux.Unlock()
-			// and proceed
+		if s.tryLock(ids) {
+			// if yes then lock them and proceed
 			return
 		}
-		s.entityMux.Unlock()
 		// if no, then wait for another update
 	}
 }
@@ -79,7 +69,7 @@ func (s EntityMutex[T]) Unlock(ids []T) {
 	}
 	s.entityMux.Unlock()
 	// send an update that indicates that some entities were unlocked
-	s.unlockUpdate.Broadcast()
+	s.unlockCond.Broadcast()
 }
 
 // isAvailable checks if all required entities are unlocked
@@ -95,8 +85,16 @@ func (s EntityMutex[T]) isAvailable(ids []T) bool {
 }
 
 // lock marks all required entities as locked
-func (s EntityMutex[T]) lock(ids []T) {
-	for _, id := range ids {
-		s.entityLock[id] = true
+func (s EntityMutex[T]) tryLock(ids []T) (success bool) {
+	s.entityMux.Lock()
+	defer s.entityMux.Unlock()
+	// check if the required entities are unlocked
+	if s.isAvailable(ids) {
+		// if yes then lock them
+		for _, id := range ids {
+			s.entityLock[id] = true
+		}
+		success = true
 	}
+	return
 }
